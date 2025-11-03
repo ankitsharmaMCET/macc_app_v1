@@ -570,8 +570,16 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
         driver_cr += (mwh * effPrice) / 10_000_000;
       }
 
-      const other_t = a * Number(otherDirectT[i] || 0);
-      const direct_t = fuel_t + raw_t + trans_t + waste_t + elec_t + other_t;
+      // const other_t = a * Number(otherDirectT[i] || 0);
+      // Positive entry means "reduce emissions", so subtract it from the emissions delta
+        const other_t = -a * Number(otherDirectT[i] || 0);
+
+
+// Signed emissions delta for the year (negative = reduction)
+      const emission_delta_t = fuel_t + raw_t + trans_t + waste_t + elec_t + other_t;
+      // Split into non‑negative reduction/addition magnitudes
+      const reduction_t = Math.max(0, -emission_delta_t);
+      const addition_t  = Math.max(0,  emission_delta_t);
 
       // Stack & financing
       const opex_cr = Number(stack.opex_cr[i] || 0);
@@ -586,24 +594,47 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
         ? capex_financed_cr * annuityFactor(i_nominal, n_tenure)
         : 0;
 
-      const net_cost_cr = (driver_cr + opex_cr + other_cr - savings_cr) + financedAnnual_cr;
 
-      // Cash flow in ₹
-      const cashflow_inr_wo_cp = (savings_cr - opex_cr - driver_cr - other_cr - financedAnnual_cr - capex_upfront_cr) * 10_000_000;
-      const cashflow_inr_w_cp = cashflow_inr_wo_cp + (Number(carbonPrice || 0) * direct_t);
+      // Equivalent annual cost for the upfront capex (use real discount rate & project life)
+      const r_real = Number(meta.discount_rate || 0.10);
+      const life   = Math.max(1, Number(meta.project_life_years || 1));
+      // FIXED: Remove upfront CAPEX annualization
+      const capexUpfrontAnnual_cr = 0; // No annualization for upfront CAPEX
 
-      const implied_cost_per_t_wo = direct_t > 0 ? (net_cost_cr * 10_000_000) / direct_t : 0;
-      const implied_cost_per_t_w = direct_t > 0 ? ((net_cost_cr * 10_000_000) - (Number(carbonPrice || 0) * direct_t)) / direct_t : 0;
+// FIXED CODE:
+      const net_cost_cr = (driver_cr + opex_cr + other_cr - savings_cr) + financedAnnual_cr + capex_upfront_cr;      // Remove capexUpfrontAnnual_cr from net_cost_cr
+
+      //const net_cost_cr = (driver_cr + opex_cr + other_cr - savings_cr) + financedAnnual_cr;
+
+      // Cash flows in ₹ — add CP benefit only on reduced tons
+// FIXED: Remove adoption scaling for upfront CAPEX
+      const cashflow_inr_wo_cp = (savings_cr - opex_cr - driver_cr - other_cr - financedAnnual_cr) * 10_000_000 
+                          - (capex_upfront_cr * 10_000_000); // One-time, no adoption scaling      
+      const cashflow_inr_w_cp  = cashflow_inr_wo_cp + (Number(carbonPrice || 0) * reduction_t);
+
+      // Per‑ton costs — always use reduction_t for denominator
+      const implied_cost_per_t_wo = reduction_t > 0 ? (net_cost_cr * 10_000_000) / reduction_t : 0;
+      const implied_cost_per_t_w  = reduction_t > 0 ? ((net_cost_cr * 10_000_000) - (Number(carbonPrice || 0) * reduction_t)) / reduction_t : 0;
 
       return {
-        year, direct_t, net_cost_cr,
-        implied_cost_per_t_wo, implied_cost_per_t_w,
-        cashflow_inr_wo_cp, cashflow_inr_w_cp,
+        year,
+        // Keep signed delta for transparency (negative = reduction)
+        direct_t: emission_delta_t,
+        // Non‑negative split for costs/plotting/CP
+        reduction_t,
+        addition_t,
+        net_cost_cr,
+        implied_cost_per_t_wo,
+        implied_cost_per_t_w,
+        cashflow_inr_wo_cp,
+        cashflow_inr_w_cp,
         pieces: { fuel_t, raw_t, trans_t, waste_t, elec_t, other_t, driver_cr, opex_cr, other_cr, savings_cr, financedAnnual_cr, capex_upfront_cr }
       };
-    });
+    }); // <-- CLOSES YEARS.map callback
 
-    let repIdx = perYear.findIndex(y => y.direct_t > 0);
+    let repIdx = perYear.findIndex(y => y.reduction_t > 0);
+
+
     if (repIdx < 0) repIdx = YEARS.indexOf(2035) >= 0 ? YEARS.indexOf(2035) : Math.floor(YEARS.length / 2);
 
     const years = perYear.map(y => y.year);
@@ -615,11 +646,13 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
     const irrWO = irr(flowsWO, years, BASE_YEAR);
     const irrW = irr(flowsW, years, BASE_YEAR);
 
-    const sumDirect = perYear.reduce((s, y) => s + Math.max(0, y.direct_t), 0);
+    const sumDirect   = perYear.reduce((s, y) => s + Number(y.reduction_t || 0), 0);
     const sumCostInrWO = perYear.reduce((s, y) => s + (y.net_cost_cr * 10_000_000), 0);
-    const sumCostInrW = perYear.reduce((s, y) => s + ((y.net_cost_cr * 10_000_000) - Number(carbonPrice || 0) * y.direct_t), 0);
+    // Subtract CP benefit only on reduced tons
+    const sumCostInrW  = perYear.reduce((s, y) =>
+      s + ((y.net_cost_cr * 10_000_000) - Number(carbonPrice || 0) * Number(y.reduction_t || 0)), 0);
     const avgCostWO = sumDirect > 0 ? sumCostInrWO / sumDirect : 0;
-    const avgCostW = sumDirect > 0 ? sumCostInrW / sumDirect : 0;
+    const avgCostW  = sumDirect > 0 ? sumCostInrW  / sumDirect : 0;
 
     return {
       YEARS: YEARS, BASE_YEAR, perYear, repIdx,
@@ -642,7 +675,8 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
 
 
   function saveTemplate() {
-    const repAbate = Math.max(0, computed.rep.direct_t);
+    const repAbate = Number(computed?.rep?.reduction_t || 0);
+
     const repCost = applyCarbonPriceInSave ? computed.rep.implied_cost_per_t_w : computed.rep.implied_cost_per_t_wo;
 
     if (repAbate <= 0) {
@@ -761,7 +795,7 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
         <div className="flex items-center justify-between p-4 border-b">
           <div className="flex gap-2">
             <button className={`px-3 py-1.5 rounded-xl border ${tab === 'quick' ? 'bg-black text-white' : ''}`} onClick={() => setTab('quick')}>Quick</button>
-            <button className={`px-3 py-1.5 rounded-xl border ${tab === 'template' ? 'bg-black text-white' : ''}`} onClick={() => setTab('template')} id="measure-wizard-title">Template (DB-aware)</button>
+            <button className={`px-3 py-1.5 rounded-xl border ${tab === 'template' ? 'bg-black text-white' : ''}`} onClick={() => setTab('template')} id="measure-wizard-title">Template (catalog)</button>
           </div>
           <button className="px-3 py-1.5 rounded-xl border" onClick={onClose}>Close</button>
         </div>
@@ -787,12 +821,12 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
                 </label>
               </div>
               <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" checked={q.selected} onChange={e => setQ({ ...q, selected: e.target.checked })} /> Use in MACC
-              </label>
+                <input type="checkbox" checked={q.selected} onChange={e => setQ({ ...q, selected: e.target.checked })} /> 
+              </label>Include in MACC
             </div>
           ) : (
             <div className="space-y-6">
-              <div className="text-sm font-semibold text-gray-800">Project Metadata</div>
+              <div className="text-sm font-semibold text-gray-800">Project details</div>
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <label className="text-sm">Project name
                   <input className="mt-1 border rounded-xl px-3 py-2 w-full" value={meta.project_name} onChange={e => setMeta({ ...meta, project_name: e.target.value })} />
@@ -810,9 +844,9 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
                 </label>
               </div>
               <div className="rounded-xl border p-3">
-                <div className="text-sm font-semibold mb-2">Adoption profile (fraction 0–1)</div>
+                <div className="text-sm font-semibold mb-2">Adoption profile (0–1)</div>
                 <SeriesRow
-                  label="Adoption fraction"
+                  label="Adoption"
                   unit="share"
                   help="Share of total potential adopted in each year. 0=no adoption, 1=full adoption. Multiplies all Δ quantities for that year."
                   series={adoption}
@@ -824,7 +858,7 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
 
 
 <CollapsibleSection
-  title="Driver & Emissions Lines"
+  title="Driver & Emissions "
   storageKey="macc_collapse_wizard_drivers"
   defaultOpen={true}
 >
@@ -851,11 +885,20 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
                             </select>
                           </label>
                           <label className="text-sm">Price override (₹/{unit})
-                            <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full" placeholder={(getUnitPrice(base)).toString()} value={ln.priceOv ?? ""} onChange={e => updateLine(fuelLines, setFuelLines, ln.id, { priceOv: e.target.value === "" ? null : Number(e.target.value) })} />
+                            <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full"
+                              placeholder={(getUnitPrice(base)).toString()}
+                              value={ln.priceOv ?? ""}
+                              onChange={e => updateLine(fuelLines, setFuelLines, ln.id, { priceOv: e.target.value === "" ? null : Number(e.target.value) })}
+                            />
                           </label>
                           <label className="text-sm">EF override (tCO₂/{unit})
-                            <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full" placeholder={(getEFperUnit(base)).toString()} value={ln.efOv ?? ""} onChange={e => updateLine(fuelLines, setFuelLines, ln.id, { efOv: e.target.value === "" ? null : Number(e.target.value) })} />
+                            <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full"
+                              placeholder={(getEFperUnit(base)).toString()}
+                              value={ln.efOv ?? ""}
+                              onChange={e => updateLine(fuelLines, setFuelLines, ln.id, { efOv: e.target.value === "" ? null : Number(e.target.value) })}
+                            />
                           </label>
+
                           <label className="text-sm">Price drift (%/yr)
                             <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full" value={ln.priceEscPctYr} onChange={e => updateLine(fuelLines, setFuelLines, ln.id, { priceEscPctYr: Number(e.target.value) })} />
                           </label>
@@ -880,68 +923,63 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
                   })}
                 </div>
 
-                {/* Raw group */}
-                <div>
-                  <div className="flex items-center justify-between">
-                    <div className="text-sm font-semibold">Raw material lines</div>
-                    <button type="button" className="text-xs px-2 py-1 rounded border" onClick={() => addLine(rawLines, setRawLines, { name: DS_RAW[0]?.name || "", priceOv: null, efOv: null, priceEscPctYr: 0, efEscPctYr: 0, delta: makeZeros() })}>+ Add raw line</button>
-                  </div>
-                  {rawLines.map((ln) => {
-                    const base = DS_RAW.find(x => x.name === ln.name);
-                    const unit = base?.unit || "-";
-                    return (
-                      <div key={ln.id} className="mt-2 rounded-lg border p-2 bg-white">
-                        <LineHeader title="Raw material line" onRemove={() => removeLine(rawLines, setRawLines, ln.id)} />
-                        <div className="grid grid-cols-2 gap-2 mt-2">
-                          <label className="text-sm col-span-2">Raw material
-                            <select className="mt-1 border rounded-xl px-3 py-2 w-full" value={ln.name} onChange={e => updateLine(rawLines, setRawLines, ln.id, { name: e.target.value })}>
-                              {DS_RAW.map(x => <option key={x.name}>{x.name}</option>)}
-                            </select>
-                          </label>
-                          <label className="text-sm">Price override (₹/{unit})
-                          <input
-                              type="number"
-                              className="mt-1 border rounded-xl px-3 py-2 w-full"
-                              placeholder={(getUnitPrice(base)).toString()}
-                              title="Leave blank to use the catalog price for this item. If filled, this replaces the catalog price in the base year; annual Price drift then applies on top."
-                              value={ln.priceOv ?? ""}
-                              onChange={e => updateLine(fuelLines, setFuelLines, ln.id, { priceOv: e.target.value === "" ? null : Number(e.target.value) })}
-                            />
-                            <div className="text-[11px] text-gray-500 mt-0.5">
-                              Blank = use catalog price. Drift (%/yr) compounds from the base year (e.g., 2030 uses {BASE_YEAR}×(1+drift)^(2030−{BASE_YEAR})).
-                            </div>                          
-                            </label>
-                          <label className="text-sm">EF override (tCO₂/{unit})
-                            <input
-                                type="number"
-                                className="mt-1 border rounded-xl px-3 py-2 w-full"
-                                placeholder={(getEFperUnit(base)).toString()}
-                                title="Leave blank to use the catalog emission factor (EF). If filled, this replaces EF in the base year; EF drift then applies on top."
-                                value={ln.efOv ?? ""}
-                                onChange={e => updateLine(fuelLines, setFuelLines, ln.id, { efOv: e.target.value === "" ? null : Number(e.target.value) })}
-                              />
-                              <div className="text-[11px] text-gray-500 mt-0.5">
-                                Blank = use catalog EF. EF drift (%/yr) compounds from the base year.
-                              </div>                          
-                          </label>
-                          <label className="text-sm">Price drift (%/yr)
-                            <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full" value={ln.priceEscPctYr} onChange={e => updateLine(rawLines, setRawLines, ln.id, { priceEscPctYr: Number(e.target.value) })} />
-                          </label>
-                          <label className="text-sm">EF drift (%/yr)
-                            <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full" value={ln.efEscPctYr} onChange={e => updateLine(rawLines, setRawLines, ln.id, { efEscPctYr: Number(e.target.value) })} />
-                          </label>
-                        </div>
-                        <SeriesRow
-                          label={`ΔRaw quantity (${unit})`}
-                          unit={unit}
-                          series={ln.delta}
-                          onChange={(i, v) => updateLine(rawLines, setRawLines, ln.id, { delta: ln.delta.map((vv, idx) => idx === i ? (v === "" ? "" : Number(v)) : vv) })}
-                          onInterpolate={() => updateLine(rawLines, setRawLines, ln.id, { delta: interpolateSeries(ln.delta) })}
+ {/* Raw group */}
+            <div className="bg-gray-50 p-4 rounded-xl">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-sm font-semibold">Raw material lines</div>
+                <button type="button" className="text-xs px-2 py-1 rounded-full border border-gray-300 text-gray-600 hover:bg-gray-100 transition-colors" onClick={() => addLine(rawLines, setRawLines, { name: DS_RAW[0]?.name || "", priceOv: null, efOv: null, priceEscPctYr: 0, efEscPctYr: 0, delta: makeZeros() })}>+ Add raw line</button>
+              </div>
+              {rawLines.map((ln) => {
+                const base = DS_RAW.find(x => x.name === ln.name);
+                const unit = base?.unit || "-";
+                return (
+                  <div key={ln.id} className="mt-2 rounded-lg border p-2 bg-white">
+                    <LineHeader title="Raw material line" onRemove={() => removeLine(rawLines, setRawLines, ln.id)} />
+                    <div className="grid grid-cols-2 gap-2 mt-2">
+                      <label className="text-sm col-span-2">Raw material
+                        <select className="mt-1 border rounded-xl px-3 py-2 w-full" value={ln.name} onChange={e => updateLine(rawLines, setRawLines, ln.id, { name: e.target.value })}>
+                          {DS_RAW.map(x => <option key={x.name}>{x.name}</option>)}
+                        </select>
+                      </label>
+                      <label className="text-sm">Price override (₹/{unit})
+                        <input
+                          type="number"
+                          className="mt-1 border rounded-xl px-3 py-2 w-full"
+                          placeholder={(getUnitPrice(base)).toString()}
+                          title="Leave blank to use the catalog price for this item. If filled, this replaces the catalog price in the base year; annual Price drift then applies on top."
+                          value={ln.priceOv ?? ""}
+                          onChange={e => updateLine(rawLines, setRawLines, ln.id, { priceOv: e.target.value === "" ? null : Number(e.target.value) })}
                         />
-                      </div>
-                    );
-                  })}
-                </div>
+                      </label>
+                      <label className="text-sm">EF override (tCO₂/{unit})
+                        <input
+                          type="number"
+                          className="mt-1 border rounded-xl px-3 py-2 w-full"
+                          placeholder={(getEFperUnit(base)).toString()}
+                          title="Leave blank to use the catalog emission factor (EF). If filled, this replaces EF in the base year; EF drift then applies on top."
+                          value={ln.efOv ?? ""}
+                          onChange={e => updateLine(rawLines, setRawLines, ln.id, { efOv: e.target.value === "" ? null : Number(e.target.value) })}
+                        />
+                      </label>
+                      <label className="text-sm">Price drift (%/yr)
+                        <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full" value={ln.priceEscPctYr} onChange={e => updateLine(rawLines, setRawLines, ln.id, { priceEscPctYr: Number(e.target.value) })} />
+                      </label>
+                      <label className="text-sm">EF drift (%/yr)
+                        <input type="number" className="mt-1 border rounded-xl px-3 py-2 w-full" value={ln.efEscPctYr} onChange={e => updateLine(rawLines, setRawLines, ln.id, { efEscPctYr: Number(e.target.value) })} />
+                      </label>
+                    </div>
+                    <SeriesRow
+                      label={`ΔRaw quantity (${unit})`}
+                      unit={unit}
+                      series={ln.delta}
+                      onChange={(i, v) => updateLine(rawLines, setRawLines, ln.id, { delta: ln.delta.map((vv, idx) => idx === i ? (v === "" ? "" : Number(v)) : vv) })}
+                      onInterpolate={() => updateLine(rawLines, setRawLines, ln.id, { delta: interpolateSeries(ln.delta) })}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+
 
                 {/* Transport group */}
                 <div>
@@ -1085,7 +1123,7 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
                   label="Other direct reduction"
                   unit="tCO₂e"
                   series={otherDirectT}
-                   help="Direct reductions not captured by the lines above (e.g., process changes, fugitives). Positive = reduction; negative = increase."
+                   help="Direct reductions not captured above (e.g., process changes, fugitives). Positive reduces emissions; negative increases."
                   onChange={(i, v) => setSeries(otherDirectT, setOtherDirectT, i, v)}
                   onInterpolate={() => setOtherDirectT(interpolateSeries(otherDirectT))}
                 />
@@ -1168,33 +1206,33 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
                   </div>
                   <div>
                     <div className="text-gray-500">Rep. direct abatement</div>
-                    <div className="font-semibold">{formatNumber(computed.rep.direct_t)} tCO₂e</div>
+                    <div className="font-semibold">{formatNumber(computed.rep.reduction_t)} tCO₂e</div>
                   </div>
                   <div>
-                    <div className="text-gray-500">Rep. cost (w/o CP)</div>
+                    <div className="text-gray-500">Rep. cost (without carbon price)</div>
                     <div className="font-semibold">{currency} {formatNumber(computed.rep.implied_cost_per_t_wo)} / tCO₂e</div>
                   </div>
                   <div className="sm:col-span-3">
-                    <div className="text-gray-500">Rep. cost (with CP = {currency} {formatNumber(carbonPrice)}/tCO₂)</div>
+                    <div className="text-gray-500">Rep. cost (with carbon price = {currency} {formatNumber(carbonPrice)}/tCO₂)</div>
                     <div className="font-semibold">{currency} {formatNumber(computed.rep.implied_cost_per_t_w)} / tCO₂e</div>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm bg-gray-50 rounded-xl p-3 border">
+                {/* <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm bg-gray-50 rounded-xl p-3 border">
                   <div>
-                    <div className="text-gray-500">NPV (w/o CP)</div>
+                    <div className="text-gray-500">NPV (without carbon price)</div>
                     <div className="font-semibold">{currency} {formatNumber(computed.finance.npvWO / 10_000_000)} cr</div>
                   </div>
                   <div>
-                    <div className="text-gray-500">NPV (with CP)</div>
+                    <div className="text-gray-500">NPV (with carbon price)</div>
                     <div className="font-semibold">{currency} {formatNumber(computed.finance.npvW / 10_000_000)} cr</div>
                   </div>
                   <div>
-                    <div className="text-gray-500">IRR (w/o CP)</div>
+                    <div className="text-gray-500">IRR (without carbon price)</div>
                     <div className="font-semibold">{computed.finance.irrWO != null ? (computed.finance.irrWO * 100).toFixed(2) + "%" : "—"}</div>
                   </div>
                   <div>
-                    <div className="text-gray-500">IRR (with CP)</div>
+                    <div className="text-gray-500">IRR (with carbon price)</div>
                     <div className="font-semibold">{computed.finance.irrW != null ? (computed.finance.irrW * 100).toFixed(2) + "%" : "—"}</div>
                   </div>
                   <div className="sm:col-span-2">
@@ -1204,7 +1242,7 @@ function MeasureWizard({ onClose, onSave, sectors, currency, carbonPrice, dataSo
                       with CP: {currency} {formatNumber(computed.finance.avgCostW)} / tCO₂e
                     </div>
                   </div>
-                </div>
+                </div> */}
               </div>
             </div>
           )}
@@ -1356,9 +1394,9 @@ function CatalogsEditor({
   return (
     <section className="bg-white rounded-2xl shadow border p-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Firm Catalogs — Drivers & EFs</h2>
+        <h2 className="text-lg font-semibold">Catalogs — Drivers & emission factors</h2>
         <div className="flex items-center gap-3">
-          <div className="text-sm">Wizard data:</div>
+          <div className="text-sm">Data source:</div>
           <label className="text-sm flex items-center gap-1">
             <input type="radio" checked={catalogMode === "sample"} onChange={() => setCatalogMode("sample")} />
             Sample
@@ -1383,7 +1421,7 @@ function CatalogsEditor({
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2">
-        <button className="px-3 py-1.5 rounded-xl border" onClick={addRow}>+ Add Row</button>
+        <button className="px-3 py-1.5 rounded-xl border" onClick={addRow}>+ Add row</button>
         <label className="px-3 py-1.5 rounded-xl border cursor-pointer">
           Import CSV
           <input hidden type="file" accept=".csv"
@@ -1436,7 +1474,7 @@ function CatalogsEditor({
       </div>
 
       <div className="text-xs text-gray-500 mt-2">
-        CSV columns expected:
+        CSV columns :
         {tab === "electricity"
           ? " state, price_per_mwh_inr, ef_tco2_per_mwh (aliases accepted: price_per_mwh | price; ef_t_per_mwh | ef_t)"
           : " name, unit, price_per_unit_inr, ef_tco2_per_unit (aliases accepted: price_per_unit | price; ef_t_per_unit | ef_t)"}
@@ -1586,7 +1624,7 @@ function ManageFirmsModal({
 
         <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="border rounded-xl p-3">
-            <div className="text-sm font-semibold mb-2">Your Firms</div>
+            <div className="text-sm font-semibold mb-2">Firms</div>
             <div className="space-y-2">
               {firms.map(f => (
                 <div key={f.id} className={`p-2 rounded-lg border ${activeFirmId === f.id ? 'border-black' : 'border-gray-200'}`}>
@@ -2099,17 +2137,27 @@ function MACCAppInner() {
 
   const budgetToTarget = useMemo(() => {
     if (!maccData.length) return { targetReached: 0, budget: 0 };
-    const targetX = mode === "capacity" ? (activeBaseline.annual_emissions * (targetIntensityPct / 100)) : targetIntensityPct;
-    let cum = 0, budget = 0, reached = 0;
+    const baseEmis = Number(activeBaseline.annual_emissions || 0);
+    const targetPct = Number(targetIntensityPct || 0);
+    // Work in one unit U: tCO₂ (capacity) or % (intensity)
+    const targetU = mode === "capacity" ? (baseEmis * (targetPct / 100)) : targetPct;
+    let cumU = 0;       // cumulative progress in unit U
+    let budgetInr = 0;  // ₹
     for (const p of maccData) {
-      const remaining = Math.max(0, targetX - cum);
-      const take = Math.min(remaining, p.abatement);
-      if (take > 0) { budget += take * p.cost; cum += take; reached = mode === "capacity" ? cum : (cum / activeBaseline.annual_emissions * 100); }
+      const pU = mode === "capacity"
+        ? Math.max(0, Number(p.abatement || 0))                                  // tCO₂
+        : (baseEmis > 0 ? (Math.max(0, Number(p.abatement || 0)) / baseEmis) * 100 : 0); // %
+      const remainingU = Math.max(0, targetU - cumU);
+      const takeU = Math.min(remainingU, pU);
+      if (takeU > 0) {
+        // Convert the taken share back to tons for budgeting
+        const takeTons = mode === "capacity" ? takeU : (baseEmis * (takeU / 100));
+        budgetInr += takeTons * Number(p.cost || 0);
+        cumU += takeU;
+      }
+      if (cumU >= targetU) break;
     }
-    const maxPossible = (mode === "capacity")
-      ? cum
-      : (activeBaseline.annual_emissions > 0 ? (cum / activeBaseline.annual_emissions) * 100 : 0);
-    return { targetReached: Math.min(reached, maxPossible), budget };
+    return { targetReached: cumU, budget: budgetInr };
   }, [maccData, activeBaseline.annual_emissions, mode, targetIntensityPct]);
 
   const totalWidth = useMemo(() => (mode === 'capacity' ? (totalX > 0 ? totalX : 1) : Math.max(100, totalX || 1)), [totalX, mode]);
@@ -2213,8 +2261,8 @@ function MACCAppInner() {
         <header className="bg-white rounded-2xl shadow border p-6">
           <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
             <div>
-              <h1 className="text-2xl sm:text-3xl font-bold">India CCTS – Marginal Abatement Cost Curve (MACC) Builder</h1>
-              <p className="text-gray-600 mt-1">Use sample data or bring your own catalogs, then build your firm’s MACC.</p>
+              <h1 className="text-2xl sm:text-3xl font-bold">India CCTS — Marginal Abatement Cost Curve (MACC) Builder</h1>
+              <p className="text-gray-600 mt-1">Load sample data or your own catalogs to build your firm's MACC.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {/* Firm Switcher */}
@@ -2230,7 +2278,7 @@ function MACCAppInner() {
 
               {/* Wizard catalog source */}
               <div className="flex items-center gap-2 border rounded-xl px-2 py-2">
-                <span className="text-sm">Wizard data</span>
+                <span className="text-sm">Data source</span>
                 <select className="border rounded-xl px-2 py-1"
                   value={catalogMode}
                   onChange={(e) => setCatalogMode(e.target.value)}>
@@ -2280,16 +2328,16 @@ function MACCAppInner() {
           <div className="space-y-2">
             <label className="block text-sm font-medium">View Mode</label>
             <div className="flex gap-2">
-              <button className={`px-3 py-2 rounded-xl border ${mode === 'capacity' ? 'bg-black text-white' : ''}`} onClick={() => setMode("capacity")}>Capacity-based</button>
-              <button className={`px-3 py-2 rounded-xl border ${mode === 'intensity' ? 'bg-black text-white' : ''}`} onClick={() => setMode("intensity")}>Intensity-based</button>
+              <button className={`px-3 py-2 rounded-xl border ${mode === 'capacity' ? 'bg-black text-white' : ''}`} onClick={() => setMode("capacity")}>Capacity</button>
+              <button className={`px-3 py-2 rounded-xl border ${mode === 'intensity' ? 'bg-black text-white' : ''}`} onClick={() => setMode("intensity")}>Intensity</button>
             </div>
-            <p className="text-xs text-gray-500">Capacity: cumulative tCO₂; Intensity: cumulative % reduction vs baseline.</p>
+            <p className="text-xs text-gray-500">Capacity: cumulative tCO₂. Intensity: cumulative % reduction vs. baseline.</p>
           </div>
 
           <div className="space-y-2">
             <label className="block text-sm font-medium">Marginal Cost Model</label>
             <div className="flex gap-2">
-              <button className={`px-3 py-2 rounded-xl border ${costModel === 'step' ? 'bg-black text-white' : ''}`} onClick={() => setCostModel("step")}>Continuous (coloured)</button>
+              <button className={`px-3 py-2 rounded-xl border ${costModel === 'step' ? 'bg-black text-white' : ''}`} onClick={() => setCostModel("step")}>Step </button>
               <button className={`px-3 py-2 rounded-xl border ${costModel === 'fit' ? 'bg-black text-white' : ''}`} onClick={() => { if (maccData.length >= 3) setCostModel("fit"); }}>Quadratic Fit</button>
             </div>
             {costModel === 'fit' && (
@@ -2306,7 +2354,7 @@ function MACCAppInner() {
                 </label>
               </div>
             )}
-            <p className="text-xs text-gray-500">Costs in MACC reflect <b>saved cost − carbon price</b> (delta-adjusted if cost already included CP).</p>
+            <p className="text-xs text-gray-500">MACC costs reflect <b>savings − carbon price</b>. If a measure already included a carbon price, only the difference from the current carbon price is subtracted.</p>
           </div>
 
           <div className="space-y-2">
@@ -2367,10 +2415,10 @@ function MACCAppInner() {
               </tr>
             </thead>
             <tbody>
-              {sectors.map((s, idx) => {
+              {sectors.map((s) => {
                 const b = baselines[s] || { production_label: "units", annual_production: 0, annual_emissions: 0 };
                 return (
-                  <tr key={idx} className="border-b">
+                  <tr key={s} className="border-b">
                     <td className="p-2">
                       <input
                         className="border rounded-lg px-2 py-1 w-48"
@@ -2436,7 +2484,7 @@ function MACCAppInner() {
 
         {/* Firm Catalogs Editor */}
         <CollapsibleSection
-          title="Driver & EF Catalogs (Fuels / Raw / Transport / Waste / Electricity)"
+          title="Catalogs — Drivers & EFs (Fuels, Raw, Transport, Waste, Electricity)"
           storageKey="macc_collapse_catalogs"
         >
           <CatalogsEditor
@@ -2666,7 +2714,7 @@ function MACCAppInner() {
     </div>
 
     <div className="w-full lg:w-[380px]">
-      <h3 className="text-base font-semibold mb-2">Target & Budget (greedy stack)</h3>
+      <h3 className="text-base font-semibold mb-2">Target & Budget </h3>
       <div className="flex items-center gap-2">
         {/* (Optional) consider making max=100 in intensity mode */}
         <input
@@ -2688,11 +2736,11 @@ function MACCAppInner() {
           <b>
             {mode === 'capacity'
               ? formatNumber(budgetToTarget.targetReached) + ' tCO₂'
-              : budgetToTarget.targetReached.toFixed(2) + '%'}
+              : (Number.isFinite(budgetToTarget.targetReached) ? budgetToTarget.targetReached.toFixed(2) : '0.00') + '%'}
           </b>
         </div>
         <div>
-          Budget required (Σ cost×tCO₂):{" "}
+          Budget required (Σ cost × tCO₂):{" "}
           <b>{currency} {formatNumber(budgetToTarget.budget)}</b>
         </div>
       </div>
@@ -2725,8 +2773,7 @@ function MACCAppInner() {
   </div>
 
   <p className="text-xs text-gray-500">
-    Costs reflect <b>saved cost − carbon price</b>. If a measure was saved “including carbon price”,
-    the chart subtracts only the <i>difference</i> between the current and saved carbon price.
+   Costs reflect <b>savings − carbon price</b>. If a measure was saved “including carbon price,” the chart subtracts only the difference from the current carbon price
   </p>
 </section>
 
@@ -2799,15 +2846,14 @@ function MACCAppInner() {
           </div>
 
           <div className="mt-3 text-xs text-gray-500">
-            CSV columns: <code>id, name, sector, abatement_tco2, cost_per_tco2, selected, details</code>. If <code>details.saved_cost_includes_carbon_price=true</code>, the chart subtracts only the <i>delta</i> between the current carbon price and <code>details.carbon_price_at_save</code>.
-          </div>
+CSV columns: <code>id, name, sector, abatement_tco2, cost_per_tco2, selected, details</code>. If <code>details.saved_cost_includes_carbon_price = true</code>, the chart subtracts only the difference between the current carbon price and <code>details.carbon_price_at_save</code>.          </div>
         </CollapsibleSection>
 
         {/* Timeseries viewer */}
         {inspected && inspectedSeries && (
           <section className="bg-white rounded-2xl shadow border p-6">
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Measure timeseries — {inspected.name}</h2>
+              <h2 className="text-lg font-semibold">time series — {inspected.name}</h2>
               <button className="px-3 py-1.5 rounded-xl border" onClick={() => setInspectedId(null)}>Close</button>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
@@ -2817,7 +2863,7 @@ function MACCAppInner() {
                   <XAxis dataKey="year" />
                   <YAxis yAxisId="left" />
                   <Tooltip />
-                  <Line yAxisId="left" type="monotone" dataKey="direct_t" name="Direct abatement (tCO₂)" />
+                    <Line yAxisId="left" type="monotone" dataKey="direct_t" name="Emissions delta (tCO₂)" />
                 </LineChart>
               </ResponsiveContainer>
               <ResponsiveContainer width="100%" height={220}>
@@ -2837,8 +2883,8 @@ function MACCAppInner() {
         <section className="bg-white rounded-2xl shadow border p-6">
           <h2 className="text-lg font-semibold mb-2">Methodology</h2>
           <ul className="list-disc pl-5 text-sm space-y-1 text-gray-700">
-            <li>Wizard uses the selected <b>catalog source</b> (Sample / Custom / Merged). In Merged mode, custom entries override sample by <code>name</code> (or <code>state</code> for electricity).</li>
-            <li>Continuous MACC uses coloured rectangles (width = potential, height = cost − carbon price or delta‑adjusted if already applied).</li>
+            <li>Wizard uses the selected <b>data source</b> (Sample / Custom / Merged). In Merged mode, custom entries override sample by <code>name</code> (or <code>state</code> for electricity).</li>
+            <li>The step MACC uses colored rectangles (width = potential; height = cost − carbon price, adjusted if already included).</li>
             <li>Wizard computes per‑year reductions via Σ(Δquantity × EF × adoption).</li>
             <li>Costs include drivers + opex + other − savings + financed annuity; upfront capex is added as that year’s cash flow.</li>
             <li>NPV/IRR are computed from yearly cash flows (with/without carbon price) discounted at the real rate.</li>
@@ -2847,7 +2893,7 @@ function MACCAppInner() {
           </ul>
         </section>
 
-        <footer className="text-xs text-gray-500 text-center pb-8">Built for India CCTS exploration — sample DB + your custom data, all in one app.</footer>
+        <footer className="text-xs text-gray-500 text-center pb-8">Built for India CCTS—works with sample and custom data. all rights reserved @Shunya_Lab  </footer>
       </div>
     </div>
   );
