@@ -1,5 +1,4 @@
 
-
  **India CCTS — Marginal Abatement Cost Curve (MACC) Builder**
 
 > **What this is:** A single‑page React app that lets you build firm‑level MACCs using sample or custom catalogs (fuels, raw materials, transport, waste, electricity). You can define measures via a Quick form or a **Template (catalog) wizard** with multi‑line drivers and financing. Multi‑firm is supported with local export/import.
@@ -286,4 +285,3 @@ $$
 ## 8) License
 
 © 2025 Shunya Lab. All rights reserved.  
-
